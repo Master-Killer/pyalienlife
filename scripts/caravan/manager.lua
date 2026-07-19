@@ -343,6 +343,22 @@ local function build_gui_connected(player, entity, anchor)
             add_gui_row(caravan_data, key, scroll_pane, true)
         end
     end
+
+    local relocate_button = main_frame.add {
+        type = "button",
+        name = "py_relocate_caravans_button",
+        caption = {"caravan-gui.relocate-all"},
+        tooltip = {"caravan-gui.relocate-all-tooltip"}
+    }
+    relocate_button.style.horizontally_stretchable = true
+    relocate_button.style.top_margin = 4
+end
+
+gui_events[defines.events.on_gui_click]["py_relocate_caravans_button"] = function(event)
+    local player = game.get_player(event.player_index) ---@cast player LuaPlayer
+    local outpost = player.opened
+    if not outpost or outpost.object_name ~= "LuaEntity" or not outpost.valid then return end
+    Impl.select_destination(player, {relocate_outpost = outpost}, player.position)
 end
 
 py.on_event(defines.events.on_gui_opened, function(event)

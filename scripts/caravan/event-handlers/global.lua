@@ -133,6 +133,90 @@ py.on_event(defines.events.on_player_cursor_stack_changed, function(event)
     storage.last_opened[event.player_index] = nil
 end)
 
+---Reassigns every non-temporary schedule entry of a caravan pointing at old_target to a new destination.
+---Mirrors the single-destination reassign rules from on_carrot_used.
+---@param caravan_data Caravan
+---@param old_target LuaEntity
+---@param entity LuaEntity? the new destination entity, or nil to use a map position
+---@param position MapPosition used when entity is nil
+---@param player_surface LuaSurface used when entity is nil
+---@return boolean modified whether at least one schedule entry was reassigned
+local function reassign_schedule_entries(caravan_data, old_target, entity, position, player_surface)
+    if not CaravanImpl.validity_check(caravan_data) then return false end
+    if not caravan_data.schedule then return false end
+    local prototype = caravan_prototypes[caravan_data.entity.name]
+    local only_outpost = prototype.only_allow_outpost_as_destination
+    if entity then
+        if only_outpost and entity.name ~= prototype.outpost then return false end
+        if entity == caravan_data.entity or entity.surface ~= caravan_data.entity.surface then return false end
+    else
+        if only_outpost then return false end
+        if player_surface ~= caravan_data.entity.surface then return false end
+    end
+
+    local modified = false
+    local restart = false
+    for schedule_id, sch in pairs(caravan_data.schedule) do
+        if sch.entity == old_target and not sch.temporary then
+            if entity then
+                sch.entity = entity
+                sch.position = entity.position
+                if entity.type == "character" then
+                    sch.player_index = entity.player.index
+                    sch.localised_name = {"caravan-gui.player-name", entity.player.name}
+                else
+                    sch.player_index = nil
+                    sch.localised_name = {"caravan-gui.entity-position", entity.prototype.localised_name, math.floor(entity.position.x), math.floor(entity.position.y)}
+                end
+            else
+                sch.entity = nil
+                sch.position = position
+                sch.player_index = nil
+                sch.localised_name = {"caravan-gui.map-position", math.floor(position.x), math.floor(position.y)}
+            end
+            modified = true
+            if caravan_data.schedule_id == schedule_id then restart = true end
+        end
+    end
+    if restart then
+        CaravanImpl.begin_schedule(caravan_data, caravan_data.schedule_id, true)
+    end
+    return modified
+end
+
+---Reassigns the destination of every caravan that has old_outpost in its schedule.
+local function relocate_all_caravans(player, old_outpost, entity, cursor_position)
+    if not old_outpost.valid then return end
+    if entity then
+        if entity.operable then storage.make_operable_next_tick[#storage.make_operable_next_tick + 1] = entity end
+        entity.operable = false -- Prevents the player from opening the gui of the clicked entity
+        if entity == old_outpost then return end
+    end
+
+    local count = 0
+    local affected = {}
+    for _, caravan_data in pairs(storage.caravans) do
+        if has_entity_in_schedule(caravan_data, old_outpost) then
+            if reassign_schedule_entries(caravan_data, old_outpost, entity, cursor_position, player.surface) then
+                count = count + 1
+                affected[caravan_data.unit_number] = true
+            end
+        end
+    end
+
+    for _, p in pairs(game.connected_players) do
+        local gui = CaravanGui.get_gui(p)
+        if gui and affected[gui.tags.unit_number] then
+            CaravanGui.update_gui(p)
+        end
+    end
+
+    player.create_local_flying_text {
+        text = {"caravan-gui.relocated-caravans", count},
+        create_at_cursor = true
+    }
+end
+
 --- Called whenever the player uses the carrot-on-stick capsule item.
 local function on_carrot_used(player, cursor_position)
     player.clear_cursor()
@@ -156,6 +240,12 @@ local function on_carrot_used(player, cursor_position)
         limit = 1,
         collision_mask = {object = true, player = true, train = true, resource = true, floor = true, transport_belt = true, ghost = true}
     }[1]
+
+    if last_opened.relocate_outpost then
+        -- Move every caravan associated with this outpost to the new destination
+        relocate_all_caravans(player, last_opened.relocate_outpost, entity, cursor_position)
+        return
+    end
 
     if last_opened.action_id then
         -- Last opened is an interrupt condition
