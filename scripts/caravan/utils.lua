@@ -3,6 +3,17 @@ local italian_names = require "italian-names"
 
 local P = {}
 
+P.outpost_names = {}
+for _, prototype in pairs(caravan_prototypes) do
+    if prototype.outpost then P.outpost_names[prototype.outpost] = true end
+end
+
+---@param entity LuaEntity?
+---@return boolean
+function P.is_outpost(entity)
+    return (entity and entity.valid and P.outpost_names[entity.name]) or false
+end
+
 ---@param caravan_data Caravan
 ---@param entity LuaEntity
 function P.get_valid_actions_for_entity(caravan_entity_name, entity)

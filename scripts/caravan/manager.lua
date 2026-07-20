@@ -344,20 +344,38 @@ local function build_gui_connected(player, entity, anchor)
         end
     end
 
-    local relocate_button = main_frame.add {
-        type = "button",
-        name = "py_relocate_caravans_button",
-        caption = {"caravan-gui.relocate-all"},
-        tooltip = {"caravan-gui.relocate-all-tooltip"}
-    }
-    relocate_button.style.horizontally_stretchable = true
-    relocate_button.style.top_margin = 4
+    if Utils.is_outpost(entity) then
+        local relocate_button = main_frame.add {
+            type = "button",
+            name = "py_relocate_caravans_button",
+            caption = {"caravan-gui.relocate-all"},
+            tooltip = {"caravan-gui.relocate-all-tooltip"}
+        }
+        relocate_button.style.horizontally_stretchable = true
+        relocate_button.style.top_margin = 4
+    end
+end
+
+---(Re)builds the relative side panel anchored on entity, destroying any previous one the player has open.
+---@param player LuaPlayer
+---@param entity LuaEntity?
+function rebuild_relative_panel(player, entity)
+    local old_gui = CaravanGui.get_relative_gui(player)
+    if old_gui then old_gui.destroy() end
+    if not entity or not entity.valid then return end
+    build_gui_connected(player, entity, {
+        gui = CaravanGui.guess_gui_type(entity),
+        position = defines.relative_gui_position.left
+    })
 end
 
 gui_events[defines.events.on_gui_click]["py_relocate_caravans_button"] = function(event)
     local player = game.get_player(event.player_index) ---@cast player LuaPlayer
     local outpost = player.opened
     if not outpost or outpost.object_name ~= "LuaEntity" or not outpost.valid then return end
+    if not Utils.is_outpost(outpost) then return end
+    local frame = event.element.parent
+    if not frame or not frame.tags or frame.tags.unit_number ~= outpost.unit_number then return end
     Impl.select_destination(player, {relocate_outpost = outpost}, player.position)
 end
 
@@ -365,12 +383,7 @@ py.on_event(defines.events.on_gui_opened, function(event)
     local player = game.get_player(event.player_index)
     local entity = event.entity
     if not entity then return end
-    local old_gui = CaravanGui.get_relative_gui(player)
-    if old_gui then old_gui.destroy() end
-    build_gui_connected(player, entity, {
-        gui = CaravanGui.guess_gui_type(entity),
-        position = defines.relative_gui_position.left
-    })
+    rebuild_relative_panel(player, entity)
 end)
 
 -- The list will be invalidated when a player changes surface, destroy it

@@ -133,88 +133,129 @@ py.on_event(defines.events.on_player_cursor_stack_changed, function(event)
     storage.last_opened[event.player_index] = nil
 end)
 
----Reassigns every non-temporary schedule entry of a caravan pointing at old_target to a new destination.
----Mirrors the single-destination reassign rules from on_carrot_used.
----@param caravan_data Caravan
----@param old_target LuaEntity
----@param entity LuaEntity? the new destination entity, or nil to use a map position
----@param position MapPosition used when entity is nil
----@param player_surface LuaSurface used when entity is nil
----@return boolean modified whether at least one schedule entry was reassigned
-local function reassign_schedule_entries(caravan_data, old_target, entity, position, player_surface)
-    if not CaravanImpl.validity_check(caravan_data) then return false end
-    if not caravan_data.schedule then return false end
-    local prototype = caravan_prototypes[caravan_data.entity.name]
-    local only_outpost = prototype.only_allow_outpost_as_destination
-    if entity then
-        if only_outpost and entity.name ~= prototype.outpost then return false end
-        if entity == caravan_data.entity or entity.surface ~= caravan_data.entity.surface then return false end
-    else
-        if only_outpost then return false end
-        if player_surface ~= caravan_data.entity.surface then return false end
-    end
+---Suppresses the GUI of a clicked entity for one tick (prevents it from opening due to the click).
+---@param entity LuaEntity
+local function suppress_entity_gui(entity)
+    if entity.operable then storage.make_operable_next_tick[#storage.make_operable_next_tick + 1] = entity end
+    entity.operable = false
+end
 
-    local modified = false
+---Whether entity is an allowed destination for caravan_data's schedule (only_allow_outpost_as_destination,
+---same surface, not the caravan itself). Mirrors the single-destination reassign rules from on_carrot_used.
+---@param caravan_data Caravan
+---@param entity LuaEntity
+---@return boolean
+local function entity_destination_allowed(caravan_data, entity)
+    local prototype = caravan_prototypes[caravan_data.entity.name]
+    if prototype.only_allow_outpost_as_destination and entity.name ~= prototype.outpost then return false end
+    if entity == caravan_data.entity or entity.surface ~= caravan_data.entity.surface then return false end
+    return true
+end
+
+---Points a schedule entry at a new entity destination.
+---@param sch table schedule entry
+---@param entity LuaEntity
+local function assign_entity_destination(sch, entity)
+    sch.entity = entity
+    sch.position = entity.position
+    if entity.type == "character" and entity.player then
+        sch.player_index = entity.player.index
+        sch.localised_name = {"caravan-gui.player-name", entity.player.name}
+    else
+        sch.player_index = nil
+        sch.localised_name = {"caravan-gui.entity-position", entity.prototype.localised_name, math.floor(entity.position.x), math.floor(entity.position.y)}
+    end
+end
+
+---Reassigns every permanent schedule entry of a caravan pointing at old_outpost to new_outpost.
+---@param caravan_data Caravan
+---@param old_outpost LuaEntity
+---@param new_outpost LuaEntity
+---@return "moved"|"incompatible"|nil
+local function reassign_caravan_to_outpost(caravan_data, old_outpost, new_outpost)
+    if not CaravanImpl.validity_check(caravan_data) then return nil end
+    if not caravan_data.schedule then return nil end
+
+    local has_stop = false
+    for _, sch in pairs(caravan_data.schedule) do
+        if sch.entity == old_outpost and not sch.temporary then
+            has_stop = true
+            break
+        end
+    end
+    if not has_stop then return nil end
+
+    if not entity_destination_allowed(caravan_data, new_outpost) then return "incompatible" end
+
     local restart = false
     for schedule_id, sch in pairs(caravan_data.schedule) do
-        if sch.entity == old_target and not sch.temporary then
-            if entity then
-                sch.entity = entity
-                sch.position = entity.position
-                if entity.type == "character" then
-                    sch.player_index = entity.player.index
-                    sch.localised_name = {"caravan-gui.player-name", entity.player.name}
-                else
-                    sch.player_index = nil
-                    sch.localised_name = {"caravan-gui.entity-position", entity.prototype.localised_name, math.floor(entity.position.x), math.floor(entity.position.y)}
-                end
-            else
-                sch.entity = nil
-                sch.position = position
-                sch.player_index = nil
-                sch.localised_name = {"caravan-gui.map-position", math.floor(position.x), math.floor(position.y)}
-            end
-            modified = true
+        if sch.entity == old_outpost and not sch.temporary then
+            assign_entity_destination(sch, new_outpost)
             if caravan_data.schedule_id == schedule_id then restart = true end
         end
     end
     if restart then
         CaravanImpl.begin_schedule(caravan_data, caravan_data.schedule_id, true)
     end
-    return modified
+    return "moved"
 end
 
----Reassigns the destination of every caravan that has old_outpost in its schedule.
-local function relocate_all_caravans(player, old_outpost, entity, cursor_position)
-    if not old_outpost.valid then return end
-    if entity then
-        if entity.operable then storage.make_operable_next_tick[#storage.make_operable_next_tick + 1] = entity end
-        entity.operable = false -- Prevents the player from opening the gui of the clicked entity
-        if entity == old_outpost then return end
+---Refreshes the full-screen caravan GUIs of affected caravans and rebuilds the side panels
+---any connected player has open on old_outpost.
+---@param old_outpost LuaEntity
+---@param moved table<integer, true> set of unit_numbers whose schedule was reassigned
+local function refresh_guis(old_outpost, moved)
+    for _, p in pairs(game.connected_players) do
+        local gui = CaravanGui.get_gui(p)
+        if gui and moved[gui.tags.unit_number] then
+            CaravanGui.update_gui(p)
+        end
+        local relative_gui = CaravanGui.get_relative_gui(p)
+        if relative_gui and relative_gui.tags.unit_number == old_outpost.unit_number then
+            rebuild_relative_panel(p, old_outpost)
+        end
+    end
+end
+
+---Reassigns the destination of every caravan of player's force that has old_outpost in its schedule.
+---@param player LuaPlayer
+---@param old_outpost LuaEntity
+---@param new_outpost LuaEntity
+local function relocate_all_caravans(player, old_outpost, new_outpost)
+    if not old_outpost.valid then
+        player.create_local_flying_text {text = {"caravan-gui.relocate-outpost-gone"}, create_at_cursor = true}
+        return
     end
 
-    local count = 0
-    local affected = {}
-    for _, caravan_data in pairs(storage.caravans) do
-        if has_entity_in_schedule(caravan_data, old_outpost) then
-            if reassign_schedule_entries(caravan_data, old_outpost, entity, cursor_position, player.surface) then
-                count = count + 1
-                affected[caravan_data.unit_number] = true
+    local moved = {}
+    local skipped = 0
+    for unit_number, caravan_data in pairs(storage.caravans) do
+        if caravan_data.entity and caravan_data.entity.valid and caravan_data.entity.force_index == player.force_index then
+            local result = reassign_caravan_to_outpost(caravan_data, old_outpost, new_outpost)
+            if result == "moved" then
+                moved[unit_number] = true
+            elseif result == "incompatible" then
+                skipped = skipped + 1
             end
         end
     end
 
-    for _, p in pairs(game.connected_players) do
-        local gui = CaravanGui.get_gui(p)
-        if gui and affected[gui.tags.unit_number] then
-            CaravanGui.update_gui(p)
-        end
+    local count = table_size(moved)
+    if next(moved) then
+        refresh_guis(old_outpost, moved)
     end
 
-    player.create_local_flying_text {
-        text = {"caravan-gui.relocated-caravans", count},
-        create_at_cursor = true
-    }
+    if skipped > 0 then
+        player.create_local_flying_text {
+            text = {"caravan-gui.relocated-caravans-skipped", count, skipped},
+            create_at_cursor = true
+        }
+    else
+        player.create_local_flying_text {
+            text = {"caravan-gui.relocated-caravans", count},
+            create_at_cursor = true
+        }
+    end
 end
 
 --- Called whenever the player uses the carrot-on-stick capsule item.
@@ -242,16 +283,25 @@ local function on_carrot_used(player, cursor_position)
     }[1]
 
     if last_opened.relocate_outpost then
-        -- Move every caravan associated with this outpost to the new destination
-        relocate_all_caravans(player, last_opened.relocate_outpost, entity, cursor_position)
+        -- Move every caravan of this force with old_outpost in its schedule to the new destination
+        local old_outpost = last_opened.relocate_outpost
+        if not Utils.is_outpost(entity) then
+            player.create_local_flying_text {text = {"caravan-gui.relocate-select-outpost"}, create_at_cursor = true}
+            return
+        end
+        suppress_entity_gui(entity)
+        if entity == old_outpost then
+            player.create_local_flying_text {text = {"caravan-gui.relocate-same-outpost"}, create_at_cursor = true}
+            return
+        end
+        relocate_all_caravans(player, old_outpost, entity)
         return
     end
 
     if last_opened.action_id then
         -- Last opened is an interrupt condition
         if interrupt_data and entity then
-            if entity.operable then storage.make_operable_next_tick[#storage.make_operable_next_tick + 1] = entity end
-            entity.operable = false -- Prevents the player from opening the gui of the clicked entity
+            suppress_entity_gui(entity)
             if entity.name == "outpost" or entity.name == "outpost-fluid" or entity.name == "outpost-aerial" then
                 local action_id = last_opened.action_id
                 interrupt_data.conditions[action_id].entity = entity
@@ -275,30 +325,18 @@ local function on_carrot_used(player, cursor_position)
             return
         end
 
-        if entity.operable then storage.make_operable_next_tick[#storage.make_operable_next_tick + 1] = entity end
-        entity.operable = false -- Prevents the player from opening the gui of the clicked entity
-        if only_outpost and entity.name ~= prototype.outpost then return end
-        if caravan_data and (entity == caravan_data.entity or entity.surface ~= caravan_data.entity.surface) then return end
+        suppress_entity_gui(entity)
+        if caravan_data and not entity_destination_allowed(caravan_data, entity) then return end
 
-        sch.entity = entity
-        sch.position = entity.position
-        if entity.type == "character" then
-            sch.player_index = entity.player.index
-            sch.localised_name = {"caravan-gui.player-name", entity.player.name}
-        else
-            sch.player_index = nil
-            sch.localised_name = {"caravan-gui.entity-position", entity.prototype.localised_name, math.floor(entity.position.x), math.floor(entity.position.y)}
-        end
+        assign_entity_destination(sch, entity)
         -- If this is our current schedule schedule item, we have the caravan restart it
         if caravan_data and caravan_data.schedule_id == last_opened.schedule_id then
             CaravanImpl.begin_schedule(caravan_data, last_opened.schedule_id, true)
         end
         --CaravanImpl.clear_invalid_actions_from_schedule(sch) #TODO
     elseif entity then
-        if entity.operable then storage.make_operable_next_tick[#storage.make_operable_next_tick + 1] = entity end
-        entity.operable = false -- Prevents the player from opening the gui of the clicked entity
-        if only_outpost and entity.name ~= prototype.outpost then return end
-        if caravan_data and (entity == caravan_data.entity or entity.surface ~= caravan_data.entity.surface) then return end
+        suppress_entity_gui(entity)
+        if caravan_data and not entity_destination_allowed(caravan_data, entity) then return end
         local player_index = nil
         local localised_name = {"caravan-gui.entity-position", entity.prototype.localised_name, math.floor(entity.position.x), math.floor(entity.position.y)}
         if entity.type == "character" then
