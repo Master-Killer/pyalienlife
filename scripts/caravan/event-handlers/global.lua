@@ -167,7 +167,21 @@ local function assign_entity_destination(sch, entity)
     end
 end
 
----Reassigns every permanent schedule entry of a caravan pointing at old_outpost to new_outpost.
+---Whether new_outpost can safely replace old_outpost anywhere it's referenced: same outpost family
+---(ground/aerial variants of item and fluid outposts are interchangeable, see Utils.outpost_category)
+---and the same surface. An item outpost must never be swapped for a fluid outpost or vice versa, since
+---their valid actions and interrupt conditions (outpost-item-count, outpost-fluid-count, ...) differ.
+---@param old_outpost LuaEntity
+---@param new_outpost LuaEntity
+---@return boolean
+local function outposts_are_interchangeable(old_outpost, new_outpost)
+    if old_outpost.surface ~= new_outpost.surface then return false end
+    local category = Utils.outpost_category(old_outpost.name)
+    return category ~= nil and category == Utils.outpost_category(new_outpost.name)
+end
+
+---Reassigns every schedule entry of a caravan pointing at old_outpost to new_outpost, including
+---in-flight temporary stops inserted by a triggered interrupt.
 ---@param caravan_data Caravan
 ---@param old_outpost LuaEntity
 ---@param new_outpost LuaEntity
@@ -178,18 +192,19 @@ local function reassign_caravan_to_outpost(caravan_data, old_outpost, new_outpos
 
     local has_stop = false
     for _, sch in pairs(caravan_data.schedule) do
-        if sch.entity == old_outpost and not sch.temporary then
+        if sch.entity == old_outpost then
             has_stop = true
             break
         end
     end
     if not has_stop then return nil end
 
+    if not outposts_are_interchangeable(old_outpost, new_outpost) then return "incompatible" end
     if not entity_destination_allowed(caravan_data, new_outpost) then return "incompatible" end
 
     local restart = false
     for schedule_id, sch in pairs(caravan_data.schedule) do
-        if sch.entity == old_outpost and not sch.temporary then
+        if sch.entity == old_outpost then
             assign_entity_destination(sch, new_outpost)
             if caravan_data.schedule_id == schedule_id then restart = true end
         end
@@ -198,6 +213,28 @@ local function reassign_caravan_to_outpost(caravan_data, old_outpost, new_outpos
         CaravanImpl.begin_schedule(caravan_data, caravan_data.schedule_id, true)
     end
     return "moved"
+end
+
+---Reassigns every schedule destination and outpost condition of an interrupt pointing at old_outpost.
+---@param interrupt table
+---@param old_outpost LuaEntity
+---@param new_outpost LuaEntity
+---@return boolean modified
+local function reassign_interrupt_references(interrupt, old_outpost, new_outpost)
+    local modified = false
+    for _, sch in pairs(interrupt.schedule or {}) do
+        if sch.entity == old_outpost then
+            assign_entity_destination(sch, new_outpost)
+            modified = true
+        end
+    end
+    for _, condition in pairs(interrupt.conditions or {}) do
+        if condition.entity == old_outpost then
+            condition.entity = new_outpost
+            modified = true
+        end
+    end
+    return modified
 end
 
 ---Refreshes the full-screen caravan GUIs of affected caravans and rebuilds the side panels
@@ -240,22 +277,44 @@ local function relocate_all_caravans(player, old_outpost, new_outpost)
         end
     end
 
+    local interrupts_updated = 0
+    if outposts_are_interchangeable(old_outpost, new_outpost) then
+        for _, interrupt in pairs(storage.interrupts) do
+            if reassign_interrupt_references(interrupt, old_outpost, new_outpost) then
+                interrupts_updated = interrupts_updated + 1
+            end
+        end
+        for player_index, edited_interrupt in pairs(storage.edited_interrupts) do
+            if reassign_interrupt_references(edited_interrupt, old_outpost, new_outpost) then
+                local edited_player = game.get_player(player_index)
+                if edited_player then
+                    EditInterruptGui.update_conditions_pane(edited_player)
+                    EditInterruptGui.update_targets_pane(edited_player)
+                end
+            end
+        end
+    end
+
     local count = table_size(moved)
     if next(moved) then
         refresh_guis(old_outpost, moved)
     end
 
+    local pieces = {""}
     if skipped > 0 then
-        player.create_local_flying_text {
-            text = {"caravan-gui.relocated-caravans-skipped", count, skipped},
-            create_at_cursor = true
-        }
+        table.insert(pieces, {"caravan-gui.relocated-caravans-skipped", count, skipped})
     else
-        player.create_local_flying_text {
-            text = {"caravan-gui.relocated-caravans", count},
-            create_at_cursor = true
-        }
+        table.insert(pieces, {"caravan-gui.relocated-caravans", count})
     end
+    if interrupts_updated > 0 then
+        table.insert(pieces, " ")
+        table.insert(pieces, {"caravan-gui.relocated-interrupts-suffix", interrupts_updated})
+    end
+
+    player.create_local_flying_text {
+        text = pieces,
+        create_at_cursor = true
+    }
 end
 
 --- Called whenever the player uses the carrot-on-stick capsule item.

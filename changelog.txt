@@ -6,7 +6,7 @@ Date: 2026-06-08
     - Added "duplicate interrupt" button to caravan GUI (thanks, Kamayana!)
     - Capped precision on fluid tooltip for itemized caravans
     - Fixed crash searching caravan interrupts with [ or ]. Resolves https://github.com/pyanodon/pybugreports/issues/1478
-    - Added a "Move all caravans" button to the outpost side panel, reassigning every caravan of your force whose permanent schedule points at that outpost to a newly selected outpost
+    - Added a "Move all caravans" button to the outpost side panel, reassigning every caravan of your force whose schedule points at that outpost to a newly selected outpost, including in-flight interrupt stops and matching interrupt destinations/conditions
 ---------------------------------------------------------------------------------------------------
 Version: 3.0.66
 Date: 2026-05-27

@@ -14,6 +14,21 @@ function P.is_outpost(entity)
     return (entity and entity.valid and P.outpost_names[entity.name]) or false
 end
 
+local outpost_categories = {
+    ["outpost"] = "outpost",
+    ["outpost-aerial"] = "outpost",
+    ["outpost-fluid"] = "outpost-fluid",
+    ["outpost-aerial-fluid"] = "outpost-fluid",
+}
+
+---Returns the outpost "family" for entity_name: ground and aerial outposts of the same kind
+---(item or fluid) are interchangeable. Returns nil for non-outpost entities.
+---@param entity_name string
+---@return string?
+function P.outpost_category(entity_name)
+    return outpost_categories[entity_name]
+end
+
 ---@param caravan_data Caravan
 ---@param entity LuaEntity
 function P.get_valid_actions_for_entity(caravan_entity_name, entity)
@@ -21,13 +36,8 @@ function P.get_valid_actions_for_entity(caravan_entity_name, entity)
     local all_actions = prototype.actions
     local valid_actions
     if entity and entity.valid then
-        if entity.name == "outpost" or entity.name == "outpost-aerial" then
-            valid_actions = all_actions.outpost
-        elseif entity.name == "outpost-fluid" or entity.name == "outpost-aerial-fluid" then
-            valid_actions = all_actions["outpost-fluid"]
-        else
-            valid_actions = all_actions[entity.type]
-        end
+        local category = P.outpost_category(entity.name)
+        valid_actions = category and all_actions[category] or all_actions[entity.type]
     end
 
     return valid_actions or all_actions.default or error()
@@ -37,13 +47,8 @@ function P.get_all_actions_for_entity(entity)
     local all_actions = Caravan.all_actions
     local valid_actions
     if entity and entity.valid then
-        if entity.name == "outpost" or entity.name == "outpost-aerial" then
-            valid_actions = all_actions.outpost
-        elseif entity.name == "outpost-fluid" or entity.name == "outpost-aerial-fluid" then
-            valid_actions = all_actions["outpost-fluid"]
-        else
-            valid_actions = all_actions[entity.type]
-        end
+        local category = P.outpost_category(entity.name)
+        valid_actions = category and all_actions[category] or all_actions[entity.type]
     end
 
     return valid_actions or all_actions.default or error()
